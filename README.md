@@ -1,19 +1,57 @@
 # Qwen3.8-Flash-Next on two DGX Sparks
 
-### Three checkpoints: `INT4-AutoRound`, the default and fastest — and `hibrid48` / `hibrid48-uncensored`. Switch with one line in `recipe.yaml`
+### v5.3: NVIDIA's [FP4-Local](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) checkpoint on vLLM 0.32 — 755 tok/s at 64 streams, 409,600-token context, 4.18M-token KV pool
 
-[`INT4-AutoRound`](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound) by
-[@azampatti](https://github.com/azampatti) (default, every v5.2 number below): 5 of 512 experts per token, AutoRound int4
-experts, fp8 side layers. [`hibrid48`](https://huggingface.co/myllmbox/Qwen3.8-Flash-Next-hibrid48) and
-[`hibrid48-uncensored`](https://huggingface.co/myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored) (the full 10-expert body,
-NVFP4; the uncensored one is gated, no guardrails): richer, more creative answers at a little less speed. To switch: in
-`recipe.yaml` comment the active `model:` line and uncomment another, then `./run.sh` — the kit applies each checkpoint's
-settings itself. Details in [Which checkpoint](#which-checkpoint).
-
-Two boxes, one model, RDMA. **v5.2: 93 tok/s average and 177 peak on a thinking-on request, 1,008 tok/s at 64 streams, 3,939
-tok/s prefill at 128k, 0.36 s to the first token.** Three commands.
+Two boxes, one model, RDMA. The default checkpoint is
+[nvidia/Qwen3.8-Flash-Next-FP4-Local](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local), served as shipped.
+**v5.3: 65 tok/s average and 92 peak on a thinking-on request, 755–810 tok/s at 64 streams, 3,171 tok/s prefill at 128k,
+0.44 s to the first token.** Three commands.
 
 **Side by side with every other stack:** [myllmbox.com](https://myllmbox.com)
+
+## v5.3 (2026-10-21)
+
+v5.2 stays available: `git checkout v5.2` (INT4-AutoRound on vLLM 0.30).
+
+**New**
+
+1. **vLLM 0.32.0**, the solo kit's v5.3 stack on two boxes: RecoverSSM
+   ([vllm#58863](https://github.com/vllm-project/vllm/pull/58863) by [@jschmied](https://github.com/jschmied)), dynamic draft
+   depth 1–7 in full CUDA graphs, the fused multi-step MTP draft.
+2. **Default checkpoint: NVIDIA's FP4-Local**, weights as shipped: NVFP4 experts with compressed scales (they stay
+   compressed on the GPU), MXFP8 dense layers. The n-gram table stays on the GPUs, half per box.
+3. **Faster drafts**: FP8 drafter projections, a two-stage draft head and draft-depth bookkeeping kept on the GPU — by
+   [@Alssndr0](https://github.com/Alssndr0). All exact: every draft is verified.
+4. **400k context by default** (YaRN; config by [@vr8vr8](https://x.com/vr8vr8), verified by
+   [@grau_marc](https://x.com/grau_marc)), with the M-RoPE cache fix from
+   [vllm#62409](https://github.com/vllm-project/vllm/pull/62409) by [@wtogami](https://github.com/wtogami) built into the
+   image. **fp8 KV cache**: 4,182,535 tokens in 36 GB per box.
+5. Carried over from v5.2: the one-shot RoCE all-reduce ([b12x](https://github.com/local-inference-lab/b12x), Apache-2.0)
+   and both halves of each ConnectX-7 port, suggested and measured by [@sethforprivacy](https://github.com/sethforprivacy)
+   (#5, #6). His TP=2 skinny-GEMM table (#4) is in the image, off by default: on FP4-Local it measured the same as vLLM 0.32's
+   own GB10 table.
+
+**Measured** (2× DGX Spark, RDMA, image v5.3, the shipped `recipe.yaml`)
+
+| | v5.3 (FP4-Local) | solo v5.3 (one box) |
+|---|---|---|
+| thinking-on request (pasture + fish), c=1: average / peak | **65.2** / **92.3** tok/s | 54.0 / 82.3 |
+| mixed prompt (thinking off): c=1 / c=16 / c=64 | 65.6 / 376.6 / **755.3** tok/s | 54.2 / 266.3 / — |
+| max context per request | **409,600** tokens | 409,600 |
+| KV pool | **4,182,535** tokens (fp8) | 1,661,476 |
+| prefill, 128k-token prompt | **3,171** tok/s | 2,301 |
+| first token, 1k prompt | **0.44** s | 0.62 s |
+
+**Per prompt** (thinking off, aggregate tok/s of all streams, averages of 3 runs; c=1 = one full answer, c≥2 = 300 s with every
+stream kept busy; **peak** = the best 10-s window measured at that concurrency)
+
+| prompt | c=1 | c=2 | c=4 | c=6 | c=8 | c=12 | c=16 | c=24 | c=32 | c=48 | c=64 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **peak** | **96.2** | **145.7** | **233.8** | **286.5** | **334.8** | **417.5** | **489.2** | **591.0** | **684.8** | **851.1** | **934.1** |
+| mixed (code + explanation) | 65.6 | 108.4 | 159.8 | 201.9 | 241.6 | 320.4 | 376.6 | 482.6 | 560.1 | 660.6 | 755.3 |
+| structured output (JSON schema) | 81.2 | 131.9 | 210.5 | 260.0 | 307.4 | 392.1 | 451.6 | 550.0 | 620.4 | 731.4 | 810.3 |
+| long prose (7,000-word story) | 55.0 | 91.0 | 147.0 | 185.2 | 224.5 | 278.8 | 328.6 | 408.7 | 469.1 | 546.8 | 608.7 |
+| code (TypeScript) | 80.8 | 126.3 | 194.9 | 244.6 | 291.1 | 368.0 | 425.4 | 520.8 | 588.1 | 699.7 | 793.3 |
 
 ## v5.2 (2026-10-06)
 
@@ -63,7 +101,7 @@ stream kept busy; **peak** = the best 10-s window measured at that concurrency)
 | long prose (7,000-word story) | 74.0 | 122.1 | 195.2 | 242.0 | 288.0 | 352.5 | 413.0 | 490.3 | 555.0 | 638.2 | 699.5 |
 | code (TypeScript) | 133.6 | 210.5 | 318.2 | 384.4 | 456.0 | 546.4 | 620.4 | 736.5 | 808.7 | 937.8 | 1,007.5 |
 
-## Quality (measured on this model, thinking on)
+## Quality (the v5.2 checkpoints, thinking on)
 
 All three checkpoints, lm-evaluation-harness against a running serve, **thinking on**, temperature 0.6 / top-p 0.95 / top-k
 20, a 32k-token budget per answer, HumanEval complete and a fixed 200-question subset (seed 123123123) of the others — the same
@@ -82,6 +120,9 @@ Subsets of 200 carry about ±3 points of sampling noise; published leaderboard n
 full sets — a sanity band, not a column.
 
 ## What changed
+
+**v5.3 (2026-10-21): NVIDIA's FP4-Local on vLLM 0.32, 400k context, fp8 KV.** See [v5.3](#v53-2026-10-21).
+v5.2 stays available: `git checkout v5.2`.
 
 **v5.2 (2026-10-06): the INT4-AutoRound checkpoint and the solo stack on two boxes.** See [v5.2](#v52-2026-10-06).
 v4.1 stays available: `git checkout v4.1`.
@@ -139,7 +180,7 @@ v1 stays available: `git checkout v1` in this repo (image `…-cluster-vllm:v2`,
 ```bash
 git clone https://github.com/myllmbox/qwen38-flash-next-cluster-recipe.git
 cd qwen38-flash-next-cluster-recipe
-./run.sh        # first run: sets the cluster up (asks for the 2nd box), downloads ~99G, syncs it, serves on :8000
+./run.sh        # first run: sets the cluster up (asks for the 2nd box), downloads ~102G, syncs it, serves on :8000
 ```
 
 **Hugging Face token.** Anonymous downloads are rate-limited, and gated models (license-agreement repos, e.g. uncensored variants) refuse anonymous access. `run.sh` looks for `HF_TOKEN`, then `~/.cache/huggingface/token` (`hf auth login`), and asks for one when the repo is gated — after you accepted its agreement on the model page. Nothing is stored by the kit.
@@ -147,7 +188,7 @@ cd qwen38-flash-next-cluster-recipe
 `./stop.sh` stops both boxes. `./view.sh` shows live stats plus the RDMA proof. Requirements: two DGX Sparks
 with docker + the NVIDIA container runtime, connected by their ConnectX ports (a direct cable or a switch),
 ssh from the head to the worker (a password once — `setup.sh` installs a key). With the weights on both boxes, a boot
-reaches healthy in about four minutes (weights ~97 s, profile + KV + graph capture ~67 s).
+reaches healthy in about six minutes; the first one compiles kernels into `cache/` and takes about fifteen.
 
 **What `run.sh` does the first time:** no `cluster.env` yet → it runs [`setup.sh`](setup.sh), which asks for the
 worker's ssh address, probes both boxes (interfaces, RDMA devices, GPU, docker), **discovers the interconnect**
@@ -163,31 +204,18 @@ per-box NCCL/gloo interface pins are added by `run.sh` from `cluster.env`; you n
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model": "Qwen/Qwen3.8-Flash-Next",
+  "model": "nvidia/Qwen3.8-Flash-Next-FP4-Local",
   "messages": [{"role": "user", "content": "hello"}]
 }'
 ```
 
 ## Which checkpoint
 
-Three checkpoints run on this exact stack; `recipe.yaml` ships with the first active and the other two commented out under it.
-Switching is swapping the `model:` line and the `kv-cache-memory` line under `vllm:`, then `./run.sh`; `run.sh` applies each checkpoint's settings itself:
-
-| `model:` | what it is | on this kit |
-|---|---|---|
-| `azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound` (default) | 5 of 512 experts per token, AutoRound int4 experts, fp8 side layers and n-gram table — every v5.2 number above | the fastest: 1,008 tok/s at 64 streams, 177 tok/s peak |
-| `myllmbox/Qwen3.8-Flash-Next-hibrid48` | the full 10-expert body, calibrated, NVFP4 output head | ~10 % slower (below), richer and more creative answers |
-| `myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored` | OrcaRouter's abliterated (refusal-removed) body with the same head — **no guardrails**; research, red-teaming, private use behind your own moderation | same speed as hibrid48; quality table above |
-
-hibrid48 runs ~10 % slower than the default: expect ~120 tok/s at 1 stream, ~590 at 16 and ~1,035 at 64. It is the lighter
-checkpoint (~99 GB vs ~122 GB), so it leaves room to push the knobs: a bigger `kv-cache-memory`, more seats (see
-[Tuning](#tuning-recipeyaml)).
-
-The uncensored repo is **gated**: open its Hugging Face page, accept the agreement, then `hf auth login` (or `export
-HF_TOKEN=…`) before `./run.sh` — the kit checks both and tells you what is missing. Running both checkpoints at different
-times? Set `served-model-name` to something distinct (e.g. `Qwen/Qwen3.8-Flash-Next-Uncensored`) so clients and logs can tell
-them apart. Both weigh ~99 GB; the first download of the second one is a full download (different body), the 8 table shards are
-shared bytes. hibrid47 / hibrid47-uncensored (bf16 head) load on this image too, at v2.1 speed.
+Every v5.3 number above is NVIDIA's [FP4-Local](https://huggingface.co/nvidia/Qwen3.8-Flash-Next-FP4-Local) (~102 GB),
+the default in `recipe.yaml`. [INT4-AutoRound](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound)
+by [@azampatti](https://github.com/azampatti) — the v5.2 default, 5 of 512 experts per token — is one commented line below it;
+the image carries its support, but it has not been measured on v5.3 (it needs a smaller `kv-cache-memory`: ~122 GB of weights).
+For the v5.2 numbers and the `hibrid48` checkpoints: `git checkout v5.2`.
 
 ## The RDMA part (why the numbers are what they are)
 
@@ -208,9 +236,8 @@ boot looks hung at 100 % CPU. The kit never asks for your password; it stabilise
 - **waits** after removing old containers until both boxes report ≥ 100 GB available (unified memory takes
   30–60 s to come back after a container dies; launching earlier gives a phantom "CUDA out of memory"),
 - **evicts its own checkpoint files from the page cache** before launch (`dd iflag=nocache`, no privileges),
-- the weights load with `fastsafetensors` (`load-format` in `recipe.yaml`), which booted cleanly on every v4 launch; with
-  vLLM's default loader instead, the image **drops each shard from the cache as soon as it has been consumed**, so the
-  cache never balloons during the load itself.
+- the weights load with the image's own loader (`load-format: mbx`), which **drops each shard from the cache as soon as it
+  has been consumed**, so the cache never balloons during the load itself.
 
 Nothing to do on your side.
 
@@ -231,42 +258,26 @@ this for you (it needs root); it takes effect immediately, no restart.
 
 ## Tuning (recipe.yaml)
 
-- **YaRN, up to 400k context** (supported): `recipe.yaml` carries a commented `max-model-len: 409600` + `hf-overrides` pair
-  under `max-model-len` — swap it in. Config by [@vr8vr8](https://x.com/vr8vr8); verified by
-  [@grau_marc](https://x.com/grau_marc): 100 % needle retrieval at 407,552 tokens, same speed.
-- **`kv-cache-memory`** (bytes, per box): two lines in `recipe.yaml` — 29G for INT4-AutoRound (1,829,182 pooled tokens),
-  33G for hibrid48 (2,079,675); swap them together with `model:`. Both leave ~11G available per box after graph capture —
-  check `free -g` on both boxes after the first boot and back off if either shows swap in use. Do **not** take vLLM's
-  "fully utilize" suggestion: unified memory over-commit has needed a power cycle.
-- **`MBX_PLE_REPLICATE: "0"`** (env): half the n-gram table per box, exchanged per gather — same speed as the full table per
-  box, and it is what pays for the KV pins above. `"1"` puts the full table on each box (~14G more per box); lower
-  `kv-cache-memory` by the same amount.
-- **`compilation-config`**: the model runner rounds every FULL-graph capture size up to a multiple of K+1 and drops the
-  ones past the largest listed, so the list must reach `max-num-seqs × 8` = 512 (K=7). Shorten it only together with
-  `max-num-seqs`; a list that stops short leaves the upper rungs decoding without CUDA graphs.
-- **`block-size: 1632`**: required at K=5–7. This model's attention keeps a small ring of recent keys sized to hold the
-  draft tokens (8 slots at K=4, 12 at K=5–7), and the ring must divide the attention block; vLLM's automatic block (1616)
-  does not divide by 12 and the boot stops with "QSA ring capacity 12 must divide the attention block size 1616". Remove
-  the line if you go back to K=4.
-- **`NCCL_MAX_NCHANNELS: "4"`** (env): see [What changed](#what-changed). More channels only add host copies here; 2 and 8
-  measured the same as 4, 1 was slower at 32 streams.
-- **`engram-config: {"cpu_offload": false}`**: vLLM 0.30 would otherwise keep the n-gram table in pinned host memory;
-  this image serves it from the GPU, the layout every number here was measured on.
-- **`gdn-prefill-backend: flashinfer`**: +5 % prefill over `triton`, same decode speed.
-- **`load-format: fastsafetensors`**: the loader every v4 boot was measured with. Remove it for vLLM's default loader.
-- **`gpu-memory-utilization`** 0.70: with the pin set it does not size the KV pool.
-- **`max-num-seqs`**: 64 — ~38k tokens of pool per seat, 12 tok/s per stream, 793 tok/s aggregate. Each running request
-  also pins part of the pool the moment it is admitted, regardless of length: the GDN recurrent state, 36 layers ×
-  (2 + K) blocks, held for rollback of rejected draft tokens (7 blocks at K=5). At 64 streams of this test the pool filled
-  to 99 % after about three minutes; at 48 it peaked at 81 %. Set 48 if your load is many long answers at once; a smaller
-  K = more seats (2 + K).
-- **fp8 KV** is not in the v4 image (the patch has not been re-ported to 0.30 — upstream PR #54846 is still open);
-  `git checkout v3` for it.
-- **`speculative-config`** K=5, `draft_sample_method: probabilistic`, `rejection_sample_method: block`: acceptance ~5.1
-  on code, ~3.9 over a whole thinking-on request, cap 6.0. Measured one change at a time against K=5 with the defaults:
-  the sampled draft +7 % single-stream (thinking off), +1.5 % thinking on, +9 % at 32 streams; block verification neutral
-  alone and on top. K=4 (`{"method":"mtp","num_speculative_tokens":4}`, capture list to 320, no `block-size`) is the
-  previous setting. A bf16 drafter was A/B'd and rejected (acceptance +0.01, −3 % steps, +3.4G).
+- **400k context** is the default (`max-model-len: 409600` + the YaRN `hf-overrides` line). For the model's native window:
+  `max-model-len: 262144` and remove `hf-overrides`.
+- **`kv-cache-memory`** (bytes, per box): 36G = 4,182,535 pooled fp8 tokens (10.2 full 400k requests); the head box keeps ~7 GiB free after a boot. Check `free -g` on both boxes after the first boot and back off if either shows swap in use. Do **not** take
+  vLLM's "fully utilize" suggestion: unified memory over-commit has needed a power cycle.
+- **`max-num-seqs: 64`**: every one of the 64 seats ran at the same time through the whole test set; at 64 streams the pool
+  sits at ~60 %. The capture list must reach `max-num-seqs × 8` = 512 (up to 7 drafts + 1); shorten both together.
+- **`block-size: 3312`**: the attention's ring of recent keys (12 slots at K=7) must divide the attention block, and the block
+  must hold the fp8 mamba page. Leave it.
+- **`mm-encoder-tp-mode: data`**: the vision tower whole on each box. Split across two, one of its NVFP4 layers lands on a
+  width the quantization kernel refuses and the boot stops.
+- **`MBX_PLE_REPLICATE: "0"`** (env): half the n-gram table per box. `"1"` puts the full table on each box (~14G more per box);
+  lower `kv-cache-memory` by the same amount.
+- **`MBX_SKINNY_GEMM_SM12X`** (env, unset = off): `"1"` swaps vLLM 0.32's own GB10 plans for the small bf16 layers for
+  [@sethforprivacy](https://github.com/sethforprivacy)'s TP=2 table (#4). Same engine step rate on FP4-Local (20.7 vs 20.8 steps/s).
+- **`NCCL_MAX_NCHANNELS: "4"`** (env): more channels only add host copies here; 2 and 8 measured the same as 4, 1 was slower
+  at 32 streams.
+- **`mtp_depth`**: dynamic draft depth 1–7, chosen live from the acceptance of the deepest draft; `mode: off` = fixed 7.
+  Written to `cache/mbx-depth.json` on both boxes; editing that file takes effect without a restart.
+- **`speculative-config`** K=7, `draft_sample_method: probabilistic`, `rejection_sample_method: block`: the text follows the
+  model's own distribution either way; sampled drafts survive more often.
 - **`max-num-batched-tokens`**: also the image-input encoder budget — 8192 fits realistic multi-image requests.
 - **`host: 127.0.0.1`**: the cluster runs on host networking, so the API would otherwise be on every interface.
   Set `0.0.0.0` to expose it on the LAN.
@@ -277,17 +288,16 @@ this for you (it needs root); it takes effect immediately, no restart.
 
 ## What's in the image
 
-`myllmbox/qwen38-flash-next-cluster-vllm:v5.2` — the solo kit's v5.2 image (vLLM 0.30.0 with our patches: the n-gram table
-as a GPU parameter, the 4-bit output head, RecoverSSM, dynamic draft depth, INT4-AutoRound support) plus the two-box layer:
+`myllmbox/qwen38-flash-next-cluster-vllm:v5.3` — the solo kit's v5.3 image (vLLM 0.32.0 with our patches: RecoverSSM, dynamic
+draft depth in full graphs, the compressed-scale NVFP4 expert kernel, the n-gram table on the GPU, the faster drafts, the
+M-RoPE YaRN fix) plus the two-box layer:
 
-1. **dynamic draft depth in full CUDA graphs** — every depth 3–7 captured, no concurrency cap.
-2. **INT4-AutoRound n-gram table** converted fp8 → NVFP4 at load, resident and split across the two boxes.
-3. **one-shot RoCE all-reduce** — [b12x](https://github.com/local-inference-lab/b12x)'s RoCE collectives (Apache-2.0) for
+1. **one-shot RoCE all-reduce** — [b12x](https://github.com/local-inference-lab/b12x)'s RoCE collectives (Apache-2.0) for
    messages up to 2 MB, NCCL above.
-4. **GB10 skinny-GEMM plans** for TP=2 (by [@sethforprivacy](https://github.com/sethforprivacy)) and the upstream fused
-   hyper-connection kernels (vllm-project/vllm#58957, #60027, #58961).
+2. **GB10 TP=2 skinny-GEMM plans** by [@sethforprivacy](https://github.com/sethforprivacy), opt-in.
+3. **INT4-AutoRound n-gram table** converted fp8 → NVFP4 at load, resident and split across the two boxes.
 
-Digest: `sha256:697d4364853312f3b50354020eb99cb12585228c9d16d1288261edb9631fa93b`
+Digest: `sha256:1ee43352dceb61c041275742644e77a07a51074e13f1b8426e36431cfb3bac4e`
 
 ## The full box
 

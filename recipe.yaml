@@ -5,13 +5,10 @@
 # worker) and the per-box NCCL/gloo interface pins are added by run.sh from cluster.env — never put them here.
 
 server:
-  image: myllmbox/qwen38-flash-next-cluster-vllm:v5.2   # pinned public tag (digest in README)
+  image: myllmbox/qwen38-flash-next-cluster-vllm:v5.3   # pinned public tag (digest in README)
   cpuset: "5-9,15-19"                           # the GB10's 10 fast Cortex-X925 cores
-  model: azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound   # INT4-AutoRound, ~122G — the default and fastest
-  # model: myllmbox/Qwen3.8-Flash-Next-hibrid48   # NVFP4, ~99G: ~10 % slower, more creative
-  # model: myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored   # same, abliterated body, NO guardrails. GATED on Hugging Face:
-                                                # accept its agreement, then hf auth login or export HF_TOKEN
-                                                # (switching model? swap the kv-cache-memory line under vllm: too)
+  model: nvidia/Qwen3.8-Flash-Next-FP4-Local    # NVIDIA's FP4-Local (NVFP4 experts, MXFP8 dense), ~102G — every v5.3 number
+  # model: azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound   # the v5.2 default; not measured on v5.3
   port: 8000                                    # OpenAI API on the head box
   host: 127.0.0.1                               # 0.0.0.0 to expose it on the LAN
   master_port: 25000                            # torch.distributed rendezvous, on the interconnect
@@ -22,15 +19,24 @@ server:
   patches: ""                                   # optional vLLM patches from patches/, space-separated. See patches/README.md
 
 env:
-  MBX_FUSED_DRAFT: "1"
-  MBX_PLE_REPLICATE: "0"                        # half the n-gram table per box; "1" = full table (~14G more per box)
   PYTHONUNBUFFERED: "1"
   TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
   TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "180"       # die in 3 min on a stuck collective
-  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
   TORCH_CUDA_ARCH_LIST: "12.1a"
   FLASHINFER_CUDA_ARCH_LIST: "12.1a"
-  MBX_SKINNY_GEMM_SM12X: "1"                    # GB10 skinny-GEMM plans (TP=2 table by sethforprivacy)
+  TRITON_CACHE_DIR: /cache/triton
+  VLLM_MARLIN_USE_ATOMIC_ADD: "1"
+  MBX_LOADER_EMPTY_CACHE: "1"
+  MBX_LOADER_PREPARE: "0"                       # weights as shipped
+  MBX_MARLIN_CSF: "1"
+  MBX_CSF_VISUAL_BF16: "0"
+  MBX_MXFP8_FI_BACKEND: "b12x"
+  VLLM_DISABLED_KERNELS: FlashInferCutedslMxfp8LinearKernel,FlashInferTrtllmMxfp8LinearKernel,B12xMxfp8LinearKernel,DeepGemmMxfp8BmmLinearKernel,HummingMxfp8LinearKernel
+  MBX_PLE_REPLICATE: "0"                        # half the n-gram table per box, on the GPU
+  MBX_DEPTH_SYNCFREE: "1"
+  MBX_DRAFT_FP8: "1"
+  MALLOC_MMAP_THRESHOLD_: "65536"
+  MALLOC_TRIM_THRESHOLD_: "131072"
   VLLM_ENABLE_ROCE_ALLREDUCE: "1"               # one-shot RoCE all-reduce (b12x) up to 2MB, NCCL above
   B12X_ROCE_CACHE_DIR: /cache/b12x-roce
   # RoCE v2 over the ConnectX link; interfaces, HCAs and the GID index are set per box by run.sh
@@ -47,23 +53,22 @@ env:
   NCCL_MAX_NCHANNELS: "4"
 
 vllm:
-  served-model-name: Qwen/Qwen3.8-Flash-Next
+  served-model-name: nvidia/Qwen3.8-Flash-Next-FP4-Local
+  enable-prompt-tokens-details: true
   engram-config: '{"cpu_offload": false}'       # n-gram table on the GPU
-  gdn-prefill-backend: flashinfer
-  moe-backend: marlin                           # hibrid48; run.sh drops it for INT4
+  moe-backend: marlin
+  mm-encoder-tp-mode: data                      # the vision tower whole on each box
   pipeline-parallel-size: 1
   distributed-executor-backend: mp
-  gpu-memory-utilization: 0.70                  # the KV pool is sized by kv-cache-memory below, not by this
-  kv-cache-memory: "29000000000"                # INT4-AutoRound: 29G per box = 1,829,182 KV tokens
-  # kv-cache-memory: "33000000000"              # hibrid48 / hibrid48-uncensored: 33G per box = 2,079,675 KV tokens
+  load-format: mbx
+  gpu-memory-utilization: 0.75                  # the KV pool is sized by kv-cache-memory below, not by this
+  kv-cache-memory: "36000000000"                # 36G per box
+  kv-cache-dtype: fp8
+  max-model-len: 409600                         # 400k via YaRN (262,144 × 1.5625)
+  hf-overrides: '{"text_config":{"max_position_embeddings":409600,"rope_parameters":{"rope_type":"yarn","factor":1.5625,"original_max_position_embeddings":262144,"rope_theta":10000000,"partial_rotary_factor":0.25,"mrope_section":[11,11,10],"mrope_interleaved":true}}}'
   compilation-config: '{"cudagraph_mode":"FULL_AND_PIECEWISE","cudagraph_capture_sizes":[1,2,3,4,5,6,7,8,10,12,14,15,16,18,20,21,24,25,28,30,32,35,36,40,42,44,45,48,49,50,52,54,55,56,60,63,64,65,66,70,72,75,77,78,80,84,88,90,91,96,98,100,104,105,112,120,128,140,144,160,168,192,196,200,224,240,256,280,288,320,336,384,392,448,512],"compile_ranges_endpoints":[32]}'
-                                                # full graphs for every draft depth 3..7 × up to 64 seats
-  block-size: 1632                              # required at K=5–7
-  load-format: fastsafetensors
-  max-model-len: 262144
-  # YaRN, up to 400k context per request (supported; tested by the community on this model): swap max-model-len for these two lines
-  # max-model-len: 409600                       # 400k = 262,144 × 1.5625
-  # hf-overrides: '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":1.5625,"original_max_position_embeddings":262144,"rope_theta":10000000,"partial_rotary_factor":0.25,"mrope_section":[11,11,10],"mrope_interleaved":true}}}'
+                                                # full graphs for every draft depth × up to 64 seats
+  block-size: 3312
   max-num-seqs: 64
   max-num-batched-tokens: 8192                  # also the image-input encoder budget
   enable-prefix-caching: true
@@ -78,7 +83,7 @@ vllm:
 # dynamic draft depth → cache/mbx-depth.json on both boxes (edit it to change it without a restart)
 mtp_depth:
   mode: dynamic                                 # dynamic | off = fixed K=7
-  min: 3                                        # lowest draft depth
+  min: 1                                        # lowest draft depth
   window: 48                                    # steps of history per decision (8–128)
   promote: [60, 45]                             # +2 / +1 depth above this % acceptance of the deepest position
   demote: [25, 15]                              # −1 / −2 depth below this %

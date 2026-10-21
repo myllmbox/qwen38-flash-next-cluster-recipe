@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Qwen3.8-Flash-Next (hibrid48: NVFP4 table on the GPU + NVFP4 output head, vLLM 0.30) on TWO DGX Sparks: TP=2 over the ConnectX link (RDMA).
+# Qwen3.8-Flash-Next (NVIDIA's FP4-Local by default, vLLM 0.32) on TWO DGX Sparks: TP=2 over the ConnectX link (RDMA).
 # First run: no cluster.env → ./setup.sh (finds the second box, the interconnect, opens the firewall). Then:
 # pull the image on both boxes, download the weights (once) and sync them to the worker, start the worker
 # (--headless) and the head, wait healthy. Everything model-side is recipe.yaml; the boxes are cluster.env.
@@ -30,7 +30,7 @@ ssh_w "mkdir -p '$MODELS_ABS' '$CACHE_ABS'"
 echo "· image $IMAGE — head"; docker pull -q "$IMAGE" >/dev/null || docker image inspect "$IMAGE" >/dev/null 2>&1 || { echo "✗ cannot pull $IMAGE"; exit 1; }
 echo "· image $IMAGE — worker"; ssh_w "docker pull -q '$IMAGE' >/dev/null || docker image inspect '$IMAGE' >/dev/null 2>&1" || { echo "✗ worker cannot pull $IMAGE"; exit 1; }
 
-# 2. weights: ~99G, resumable — download on the head, then sync to the worker at the SAME path
+# 2. weights: ~102G, resumable — download on the head, then sync to the worker at the SAME path
 # "complete" = the index is there AND no partial blob is left behind by an interrupted download (huggingface_hub keeps
 # them under .cache/huggingface/download/*.incomplete and resumes them) — the index lands early, so it alone proves nothing.
 if [ ! -f "$MODEL_DIR/model.safetensors.index.json" ] || [ -n "$(find "$MODEL_DIR/.cache" -name '*.incomplete' -print -quit 2>/dev/null)" ]; then
@@ -47,7 +47,7 @@ if [ ! -f "$MODEL_DIR/model.safetensors.index.json" ] || [ -n "$(find "$MODEL_DI
   fi
 fi
 if ! ssh_w "[ -f '$MODEL_DIR/model.safetensors.index.json' ]"; then
-  echo "· syncing weights to the worker (one-time, ~99G over ssh — resumable, rerun if interrupted)"
+  echo "· syncing weights to the worker (one-time, ~102G over ssh — resumable, rerun if interrupted)"
   # .cache/ = huggingface_hub's download bookkeeping; the worker never reads it
   rsync -a --size-only --info=progress2 --exclude '.cache/' -e "ssh -o BatchMode=yes" "$MODEL_DIR/" "$WORKER:$MODEL_DIR/"
 fi
@@ -60,7 +60,7 @@ for side in head worker; do
   if [ "$side" = head ]; then islink=$([ -L "$MODEL_DIR" ] && echo yes || echo no); else islink=$(ssh_w "[ -L '$MODEL_DIR' ] && echo yes || echo no"); fi
   if [ "$islink" = yes ]; then
     echo "✗ $side: $MODEL_DIR is a symlink — the container cannot follow it. Replace it with a real directory:"
-    echo "    rm $MODEL_DIR && cp -al /path/to/Qwen3.8-Flash-Next-hibrid46 $MODEL_DIR     # hardlink copy, instant"
+    echo "    rm $MODEL_DIR && cp -al /path/to/$LOCAL_NAME $MODEL_DIR     # hardlink copy, instant"
     exit 1
   fi
 done
@@ -73,6 +73,11 @@ ENVS=(); while IFS=$'\t' read -r k v; do [ -n "$k" ] && ENVS+=(-e "$k=$v"); done
 FLAGS=(); while IFS=$'\t' read -r k v; do
   case "$v" in true) FLAGS+=("--$k");; false|null|"") ;; *) FLAGS+=("--$k" "$v");; esac
 done < <(rsection vllm)
+# two-stage draft head: the basis fitted on this checkpoint, shipped in the image (none → the full head drafts)
+if ! printf '%s\n' "${ENVS[@]}" | grep -q '^MBX_DRAFT_HEAD2='; then
+  BASIS="/opt/mbx/draft/$LOCAL_NAME.basis.pt"
+  if docker run --rm --entrypoint test "$IMAGE" -f "$BASIS"; then ENVS+=(-e "MBX_DRAFT_HEAD2=$BASIS"); fi
+fi
 
 # 4a. INT4-AutoRound checkpoint (its fp8 n-gram table in ple-table/, its own MTP draft head): fp8 side layers + draft scale 2, the
 #     table converted fp8 → NVFP4 at load (resident, half per box), its draft head (cache/draft-k10: links + small JSON, top-k 10,
@@ -207,7 +212,7 @@ printf '%s\n' "$MDJ" > "$CACHE_ABS/mbx-depth.json"; printf '%s\n' "$MDJ" | ssh_w
 [ "${MD_MODE:-off}" = dynamic ] && echo "· draft depth: dynamic (min ${MD_MIN:-3}) — cache/mbx-depth.json, same on both boxes"
 wait_mem 100 120 || exit 1
 evict_cache "$MODEL_DIR"
-echo "· starting head (rank 0) — API on $HOST:$PORT once healthy (about 4 min with the weights present)"
+echo "· starting head (rank 0) — API on $HOST:$PORT once healthy (~6 min with the weights present, ~15 min on the first boot)"
 eval "$(compose 0 "$HEAD_IFACE" "$HEAD_IC" "$HEAD_HCA" "$HEAD_RDMA" "$HEAD_GID")" >/dev/null
 sleep 2
 echo "· starting worker ($WORKER_HOST, rank 1, --headless)"
@@ -218,7 +223,7 @@ echo "· streaming engine logs until healthy (Ctrl-C detaches; the cluster keeps
 docker logs -f "$NAME" 2>&1 &
 LOGS=$!
 trap 'kill "$LOGS" 2>/dev/null || true' EXIT INT TERM
-for i in $(seq 1 360); do
+for i in $(seq 1 480); do
   if curl -sf -m 3 "http://$HOST:$PORT/health" >/dev/null 2>&1; then
     kill "$LOGS" 2>/dev/null || true; wait "$LOGS" 2>/dev/null || true
     echo
@@ -242,4 +247,4 @@ for i in $(seq 1 360); do
   fi
   sleep 5
 done
-echo "✗ not healthy after 30 min — still booting? watch: docker logs -f $NAME"; exit 1
+echo "✗ not healthy after 40 min — still booting? watch: docker logs -f $NAME"; exit 1

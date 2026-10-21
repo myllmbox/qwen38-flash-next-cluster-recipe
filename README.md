@@ -7,7 +7,7 @@ Two boxes, one model, RDMA. The default checkpoint is
 **v5.3: 65 tok/s average and 92 peak on a thinking-on request, 755–810 tok/s at 64 streams, 3,171 tok/s prefill at 128k,
 0.44 s to the first token.** Three commands.
 
-**Side by side with every other stack:** [myllmbox.com](https://myllmbox.com)
+**Side by side with the one-box kit** — every number, gauntlet page and quality verdict: [myllmbox.com/?a=mbx-v53-tp2&b=mbx-v53](https://myllmbox.com/?a=mbx-v53-tp2&b=mbx-v53)
 
 ## v5.3 (2026-10-21)
 
@@ -36,6 +36,7 @@ v5.2 stays available: `git checkout v5.2` (INT4-AutoRound on vLLM 0.30).
 | | v5.3 (FP4-Local) | solo v5.3 (one box) |
 |---|---|---|
 | thinking-on request (pasture + fish), c=1: average / peak | **65.2** / **92.3** tok/s | 54.0 / 82.3 |
+| gauntlet pages (pasture + fish) | **9 / 12** | 9 / 12 |
 | mixed prompt (thinking off): c=1 / c=16 / c=64 | 65.6 / 376.6 / **755.3** tok/s | 54.2 / 266.3 / — |
 | max context per request | **409,600** tokens | 409,600 |
 | KV pool | **4,182,535** tokens (fp8) | 1,661,476 |

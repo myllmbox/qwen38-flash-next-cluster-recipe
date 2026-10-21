@@ -216,7 +216,10 @@ Every v5.3 number above is NVIDIA's [FP4-Local](https://huggingface.co/nvidia/Qw
 the default in `recipe.yaml`. [INT4-AutoRound](https://huggingface.co/azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound)
 by [@azampatti](https://github.com/azampatti) — the v5.2 default, 5 of 512 experts per token — is one commented line below it;
 the image carries its support, but it has not been measured on v5.3 (it needs a smaller `kv-cache-memory`: ~122 GB of weights).
-For the v5.2 numbers and the `hibrid48` checkpoints: `git checkout v5.2`.
+[`hibrid48`](https://huggingface.co/myllmbox/Qwen3.8-Flash-Next-hibrid48) and
+[`hibrid48-uncensored`](https://huggingface.co/myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored) (gated, no guardrails) run on the
+same image by swapping the `model:` line (`run.sh` picks hibrid48's draft basis itself); not measured on v5.3 either.
+For the v5.2 numbers: `git checkout v5.2`.
 
 ## The RDMA part (why the numbers are what they are)
 

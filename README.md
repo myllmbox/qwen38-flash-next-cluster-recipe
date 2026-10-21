@@ -205,7 +205,7 @@ per-box NCCL/gloo interface pins are added by `run.sh` from `cluster.env`; you n
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
-  "model": "nvidia/Qwen3.8-Flash-Next-FP4-Local",
+  "model": "Qwen/Qwen3.8-Flash-Next",
   "messages": [{"role": "user", "content": "hello"}]
 }'
 ```

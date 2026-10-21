@@ -12,7 +12,6 @@ server:
   # model: myllmbox/Qwen3.8-Flash-Next-hibrid48-uncensored   # same, abliterated body, NO guardrails. GATED on Hugging Face:
                                                 # accept its agreement, then hf auth login or export HF_TOKEN
   # model: azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound   # the v5.2 default, ~122G (needs a smaller kv-cache-memory); not measured on v5.3
-                                                # switching? set served-model-name under vllm: to match
   port: 8000                                    # OpenAI API on the head box
   host: 127.0.0.1                               # 0.0.0.0 to expose it on the LAN
   master_port: 25000                            # torch.distributed rendezvous, on the interconnect
@@ -57,7 +56,7 @@ env:
   NCCL_MAX_NCHANNELS: "4"
 
 vllm:
-  served-model-name: nvidia/Qwen3.8-Flash-Next-FP4-Local
+  served-model-name: Qwen/Qwen3.8-Flash-Next
   enable-prompt-tokens-details: true
   engram-config: '{"cpu_offload": false}'       # n-gram table on the GPU
   moe-backend: marlin

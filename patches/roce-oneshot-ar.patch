@@ -1,0 +1,154 @@
+RoCE one-shot all-reduce for TP=2 decode-size messages, via b12x's RoCEnante (contributed by @sethforprivacy).
+- NCCL's ring LL takes 38-93 us per decode-size all-reduce on two GB10s. b12x.comm.roce (local-inference-lab/b12x
+  @ e4084d2e, Apache-2.0) RDMA-writes each rank's input into pinned host slots on the peer (no GPUDirect on GB10) and
+  one kernel sums in a fixed rank order: ~15 us. TP=2 messages up to ROCE_AR_MAX bytes (default 1 MiB; bf16/fp16/fp32,
+  contiguous, 16-byte multiple) take it, in eager mode and inside CUDA graphs; larger ones stay on NCCL. The routing
+  decision is made from shape and dtype only, so both ranks always route alike.
+- Exact: with two ranks there is one pair of values to add and both ranks sum in the same order. Stress test of
+  360,000 all-reduces inside a captured CUDA graph (5 KB-1 MB, inputs rotated every replay): every output
+  bit-identical to NCCL's sum, 0 stale results, outputs identical across ranks.
+- Fail-stop: a timed-out RDMA wait freezes the runtime and the next eager step raises (check_health() in the logits
+  all-gather), so a dead link ends the engine like an NCCL timeout instead of hanging.
+- Measured on 2x GB10, image v6, hibrid48, K=5, together with dual-rail NCCL (NCCL_IB_HCA= both PCIe halves +
+  NCCL_IB_MERGE_NICS=1): 1-stream decode step -1.9 ms, 8 / 16 streams +6 / +5 %, NLL unchanged, 0 RoCE errors; in
+  production on our pair since 2026-10-01.
+- Needs, on BOTH boxes: b12x at e4084d2e under the cache dir (it is mounted at /cache), e.g.
+  `git clone https://github.com/local-inference-lab/b12x cache/b12x && git -C cache/b12x checkout e4084d2e`, and
+  in recipe.yaml env: ROCE_AR: "1", PYTHONPATH: "/cache/b12x". Devices: ROCE_AR_HCAS, else this box's NCCL_IB_HCA
+  (run.sh sets it per box). We run it with both PCIe functions of the cabled port (e.g. rocep1s0f0,roceP2p1s0f0),
+  which needs the second function addressed on its own subnet; one HCA per box has not been measured.
+- Startup logs "ROCE_AR: RoCEnante 2-rank all-reduce active (rank N, <hcas>, max <bytes> bytes)" on each rank.
+  Without ROCE_AR=1 the patch does nothing (and b12x is not imported).
+
+--- a/distributed/device_communicators/cuda_communicator.py
++++ b/distributed/device_communicators/cuda_communicator.py
+@@ -26,6 +26,88 @@
+ logger = init_logger(__name__)
+ 
+ 
++class _RoceOneShotAR:
++    """One-shot all-reduce over RoCE for a 2-rank TP group (ROCE_AR=1), via b12x's RoCEnante (b12x.comm.roce,
++    local-inference-lab/b12x @ e4084d2e, Apache-2.0; on PYTHONPATH, nothing installed).
++
++    Each rank RDMA-writes its input into pinned host slots of the peer (GB10 unified memory, no GPUDirect), a C proxy
++    thread posts the writes, and one kernel sums in a fixed rank order, so both ranks get bit-identical outputs.
++    Eligible all-reduces (bf16/fp16/fp32, contiguous, 16-byte multiple, <= ROCE_AR_MAX bytes; decided from shape and
++    dtype only, so both ranks route alike) use it in eager mode and inside CUDA graphs; larger ones stay on NCCL.
++    Fail-stop: a timed-out wait freezes the runtime and check_health() (called from the eager logits all-gather of
++    every step) raises.
++    """
++
++    def __init__(self, cpu_group, device: torch.device, max_size: int) -> None:
++        import os
++
++        import torch.distributed as dist
++
++        self.disabled = True
++        self.rank = dist.get_rank(cpu_group)
++        world = dist.get_world_size(cpu_group)
++        if world != 2:
++            logger.warning("ROCE_AR needs a 2-rank TP group (got %d); disabled", world)
++            return
++        from b12x.comm import roce
++        from b12x.comm.roce import _preparation
++        from b12x.preparation import PreparationSession, PreparedCall
++
++        # This box's RDMA devices: ROCE_AR_HCAS, else NCCL_IB_HCA (which the recipe sets per box) with "=" and
++        # ":port" stripped; an exclusion list ("^...") names no device. Measured with both PCIe functions of the
++        # cabled port listed.
++        spec = os.environ.get("ROCE_AR_HCAS") or os.environ.get("NCCL_IB_HCA", "")
++        hcas = [] if spec.startswith("^") else [h.split(":")[0] for h in spec.lstrip("=").split(",") if h]
++        if not hcas:
++            logger.warning("ROCE_AR: no RDMA device list (set ROCE_AR_HCAS or NCCL_IB_HCA); disabled")
++            return
++        self.device = device
++        self.max_size = int(max_size)
++        self.rt = roce.AllReduce(exchange_group=cpu_group, device=device, max_size=self.max_size,
++                                 max_gather_bytes=1 << 20, hca_names=hcas)
++        query = roce.query_from_runtime(
++            self.rt, surface="AllReduce.all_reduce", call={"dtypes": ("float16", "bfloat16", "float32")},
++            topology="roce_rdma", peer_hosts=("roce-ar-0", "roce-ar-1"))
++        self.plan = roce.plan(query, runtime=self.rt)
++        seeds = [torch.zeros(16 // dt.itemsize, dtype=dt, device=device)
++                 for dt in (torch.float16, torch.bfloat16, torch.float32)]
++
++        def prepare(state):
++            calls = [_preparation.prepared_call(state, inp=s) for s in seeds]
++            return PreparedCall(run=lambda: [c.run() for c in calls])
++
++        PreparationSession(device=device, autotune=False, compile_workers=2).prepare(
++            (self.plan.request(name="roce-ar", prepare_call=prepare),))
++        self.disabled = False
++        logger.info("ROCE_AR: RoCEnante 2-rank all-reduce active (rank %d, %s, max %d bytes)",
++                    self.rank, ",".join(hcas), self.max_size)
++
++    @staticmethod
++    def maybe_create(unique_name: str, cpu_group, device: torch.device, world_size: int):
++        import os
++
++        if os.environ.get("ROCE_AR", "0") != "1" or unique_name.split(":")[0] != "tp" or world_size != 2:
++            return None
++        return _RoceOneShotAR(cpu_group, device, int(os.environ.get("ROCE_AR_MAX", str(1 << 20))))
++
++    def should_allreduce(self, inp: torch.Tensor) -> bool:
++        return not self.disabled and self.rt.should_allreduce(inp)
++
++    def all_reduce(self, inp: torch.Tensor) -> torch.Tensor:
++        out = torch.empty_like(inp)
++        self.rt.all_reduce(inp, out=out, plan=self.plan)
++        return out
++
++    def check_health(self) -> None:
++        if not self.disabled:
++            self.rt.check_health()
++
++    def close(self) -> None:
++        if not self.disabled:
++            self.disabled = True
++            self.rt.close()
++
++
+ class CudaCommunicator(DeviceCommunicatorBase):
+     def __init__(
+         self,
+@@ -103,6 +185,9 @@
+             if is_symmetric_memory_enabled():
+                 register_nccl_symmetric_ops(self.pynccl_comm)
+ 
++        # ROCE_AR=1: RoCEnante one-shot all-reduce for the 2-rank TP group; None otherwise.
++        self.roce_ar = _RoceOneShotAR.maybe_create(unique_name, self.cpu_group, self.device, self.world_size)
++
+         self.ca_comm: CustomAllreduce | None = None
+         self.qr_comm: QuickAllReduce | None = None
+         self.symm_mem_comm: SymmMemCommunicator | None = None
+@@ -325,6 +410,9 @@
+         )
+ 
+     def all_reduce(self, input_):
++        roce_ar = getattr(self, "roce_ar", None)
++        if roce_ar is not None and roce_ar.should_allreduce(input_):
++            return roce_ar.all_reduce(input_)
+         fi_ar_comm = self.fi_ar_comm
+         use_fi_ar = (
+             fi_ar_comm is not None
+@@ -412,6 +500,10 @@
+         return ca_comm.custom_reduce_scatter(input_.contiguous())
+ 
+     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
++        # ROCE_AR: graph replays cannot report a RoCE timeout inline; the eager logits all-gather of every step
++        # checks the runtime's health and raises on a poisoned runtime.
++        if getattr(self, "roce_ar", None) is not None and not torch.cuda.is_current_stream_capturing():
++            self.roce_ar.check_health()
+         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
+         # enabled (mirrors reduce_scatter); otherwise fall back to the
+         # PyNccl/base-class all-gather. Sequence parallelism's
+@@ -651,6 +743,9 @@
+             raise ValueError("No PyNCCL communicator found")
+ 
+     def destroy(self):
++        if getattr(self, "roce_ar", None) is not None:
++            self.roce_ar.close()
++            self.roce_ar = None
+         if self.pynccl_comm is not None:
+             self.pynccl_comm.destroy()
+             self.pynccl_comm = None

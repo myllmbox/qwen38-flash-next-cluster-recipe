@@ -9,6 +9,24 @@ Two boxes, one model, RDMA. The default checkpoint is
 
 **Side by side with the one-box kit** — every number, gauntlet page and quality verdict: [myllmbox.com/?a=mbx-v53-tp2&b=mbx-v53](https://myllmbox.com/?a=mbx-v53-tp2&b=mbx-v53)
 
+## v5.3.1 (2026-10-23)
+
+Same checkpoint and image base as v5.3; `git checkout v5.3` for the previous one.
+
+1. **Agent turns resume from the cache.** Prefill checkpoints for the GDN layers ([vLLM #60050](https://github.com/vllm-project/vllm/pull/60050))
+   and the n-gram short conv, cache hits every 64 tokens. A repeated 200k prompt recomputes 124 tokens (v5.3: ~12,500);
+   the next turn of a conversation recomputes only the new turn.
+2. **No quantization of our own.** The drafter runs as shipped (bf16); v5.3's FP8 drafter projections are gone.
+   Draft acceptance 3.48 (v5.3: 3.30) on the thinking-on pasture.
+3. **MXFP8 on b12x as NVIDIA ships it** (bf16 activations on decode, MXFP8 on prefill).
+
+| | v5.3.1 | v5.3 |
+|---|---|---|
+| first token, 200k context already cached | 0.95 s | 4.1 s |
+| recomputed on a repeated 200k prompt | 124 | ~12,500 |
+| first token, 200k cold | 68.8 s | 63.4 s (197k) |
+| thinking-on pasture, avg / peak tok/s | 66.4 / 91.9 | 66.8 / 92.3 |
+
 ## v5.3 (2026-10-21)
 
 v5.2 stays available: `git checkout v5.2` (INT4-AutoRound on vLLM 0.30).
@@ -122,6 +140,7 @@ full sets — a sanity band, not a column.
 
 ## What changed
 
+**v5.3.1 (2026-10-23): agent turns resume from the cache, no own quantization.** See [v5.3.1](#v531-2026-10-23).
 **v5.3 (2026-10-21): NVIDIA's FP4-Local on vLLM 0.32, 400k context, fp8 KV.** See [v5.3](#v53-2026-10-21).
 v5.2 stays available: `git checkout v5.2`.
 
@@ -268,8 +287,8 @@ this for you (it needs root); it takes effect immediately, no restart.
   vLLM's "fully utilize" suggestion: unified memory over-commit has needed a power cycle.
 - **`max-num-seqs: 64`**: every one of the 64 seats ran at the same time through the whole test set; at 64 streams the pool
   sits at ~60 %. The capture list must reach `max-num-seqs × 8` = 512 (up to 7 drafts + 1); shorten both together.
-- **`block-size: 3312`**: the attention's ring of recent keys (12 slots at K=7) must divide the attention block, and the block
-  must hold the fp8 mamba page. Leave it.
+- **`block-size: 3456`**, **`prefix-match-unit: 64`**: the block is a multiple of 12 (the attention's ring of recent keys at
+  K=7) and of 64 (the prefill-checkpoint grid) and holds the fp8 mamba page; cache hits land every 64 tokens. Leave them.
 - **`mm-encoder-tp-mode: data`**: the vision tower whole on each box. Split across two, one of its NVFP4 layers lands on a
   width the quantization kernel refuses and the boot stops.
 - **`MBX_PLE_REPLICATE: "0"`** (env): half the n-gram table per box. `"1"` puts the full table on each box (~14G more per box);
@@ -292,8 +311,8 @@ this for you (it needs root); it takes effect immediately, no restart.
 
 ## What's in the image
 
-`myllmbox/qwen38-flash-next-cluster-vllm:v5.3` — the solo kit's v5.3 image (vLLM 0.32.0 with our patches: RecoverSSM, dynamic
-draft depth in full graphs, the compressed-scale NVFP4 expert kernel, the n-gram table on the GPU, the faster drafts, the
+`myllmbox/qwen38-flash-next-cluster-vllm:v5.3.1` — the solo kit's v5.3 image (vLLM 0.32.0 with our patches: RecoverSSM, dynamic
+draft depth in full graphs, the compressed-scale NVFP4 expert kernel, the n-gram table on the GPU, GDN + n-gram prefill checkpoints, the
 M-RoPE YaRN fix) plus the two-box layer:
 
 1. **one-shot RoCE all-reduce** — [b12x](https://github.com/local-inference-lab/b12x)'s RoCE collectives (Apache-2.0) for
@@ -301,7 +320,7 @@ M-RoPE YaRN fix) plus the two-box layer:
 2. **GB10 TP=2 skinny-GEMM plans** by [@sethforprivacy](https://github.com/sethforprivacy), opt-in.
 3. **INT4-AutoRound n-gram table** converted fp8 → NVFP4 at load, resident and split across the two boxes.
 
-Digest: `sha256:1ee43352dceb61c041275742644e77a07a51074e13f1b8426e36431cfb3bac4e`
+Digest: `sha256:a87154e4edca649013b7b8934df70ac53e9f096f5d0e42a823f0ee36452ca315`
 
 ## The full box
 

@@ -73,11 +73,6 @@ ENVS=(); while IFS=$'\t' read -r k v; do [ -n "$k" ] && ENVS+=(-e "$k=$v"); done
 FLAGS=(); while IFS=$'\t' read -r k v; do
   case "$v" in true) FLAGS+=("--$k");; false|null|"") ;; *) FLAGS+=("--$k" "$v");; esac
 done < <(rsection vllm)
-# two-stage draft head: the basis fitted on this checkpoint, shipped in the image (none → the full head drafts)
-if ! printf '%s\n' "${ENVS[@]}" | grep -q '^MBX_DRAFT_HEAD2='; then
-  BASIS="/opt/mbx/draft/$LOCAL_NAME.basis.pt"
-  if docker run --rm --entrypoint test "$IMAGE" -f "$BASIS"; then ENVS+=(-e "MBX_DRAFT_HEAD2=$BASIS"); fi
-fi
 
 # 4a. INT4-AutoRound checkpoint (its fp8 n-gram table in ple-table/, its own MTP draft head): fp8 side layers + draft scale 2, the
 #     table converted fp8 → NVFP4 at load (resident, half per box), its draft head (cache/draft-k10: links + small JSON, top-k 10,

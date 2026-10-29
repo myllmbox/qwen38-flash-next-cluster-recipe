@@ -117,6 +117,10 @@ PY
   FLAGS=("${F2[@]}" --enable-expert-parallel)
   echo "· INT4-AutoRound: fp8 side layers, n-gram table fp8 → NVFP4 at load, its draft head (cache/draft-k10), expert parallel"
 fi
+# compressed-tensors checkpoints (hibrid48-uncensored: fp8 q/k/v, bf16 indexer projection) load the indexer unfused
+if grep -q '"quant_method": *"compressed-tensors"' "$MODEL_DIR/config.json" 2>/dev/null; then
+  ENVS+=(-e MBX_QSA_UNFUSE_INDEXER=1)
+fi
 compose() {  # compose <rank> <iface> <ic-ip> <hca> <has-rdma yes|no> <gid-index|"">  → prints the docker run command (quoted)
   local rank=$1 iface=$2 ic=$3 hca=$4 rdma=$5 gid=$6 a=()
   a=(docker run -d --name "$NAME" --gpus all --ipc=host --network host --cap-add SYS_PTRACE)
@@ -197,14 +201,7 @@ for side in head worker; do
   c="docker run --rm --entrypoint rm -v '$CACHE_ABS:/c' '$IMAGE' -rf /c/vllm-cache/flashinfer_autotune_cache"
   if [ $side = head ]; then sh -c "$c"; else ssh_w "$c"; fi
 done
-# dynamic draft depth (recipe.yaml mtp_depth; absent or mode: off = fixed K) → cache/mbx-depth.json on BOTH boxes (ranks must agree)
-lst() { printf '%s' "$1" | tr -d '[] '; }
-MD_MODE="$(rkey mtp_depth mode)"; MD_MIN="$(rkey mtp_depth min)"; MD_WIN="$(rkey mtp_depth window)"
-MD_UP="$(lst "$(rkey mtp_depth promote)")"; MD_DN="$(lst "$(rkey mtp_depth demote)")"; MD_LOG="$(rkey mtp_depth log)"
-MDJ="$(printf '{"mode": "%s", "min": %s, "window": %s, "promote": [%s], "demote": [%s], "log": %s}' \
-  "${MD_MODE:-off}" "${MD_MIN:-3}" "${MD_WIN:-48}" "${MD_UP:-60,45}" "${MD_DN:-25,15}" "${MD_LOG:-false}")"
-printf '%s\n' "$MDJ" > "$CACHE_ABS/mbx-depth.json"; printf '%s\n' "$MDJ" | ssh_w "cat > '$CACHE_ABS/mbx-depth.json'"
-[ "${MD_MODE:-off}" = dynamic ] && echo "· draft depth: dynamic (min ${MD_MIN:-3}) — cache/mbx-depth.json, same on both boxes"
+[ "$(rkey env MBX_DEPTH_MODE)" = dynamic ] && echo "· draft depth: dynamic, ceiling $(rkey env MBX_DEPTH_CEIL) (recipe.yaml env)"
 wait_mem 100 120 || exit 1
 evict_cache "$MODEL_DIR"
 echo "· starting head (rank 0) — API on $HOST:$PORT once healthy (~6 min with the weights present, ~15 min on the first boot)"

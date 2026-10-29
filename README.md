@@ -336,8 +336,7 @@ this for you (it needs root); it takes effect immediately, no restart.
 - **`speculative-config`** K=12, `draft_sample_method: probabilistic`, `rejection_sample_method: block`: the text follows the
   model's own distribution either way; sampled drafts survive more often.
 - **`max-num-batched-tokens`**: also the image-input encoder budget — 8192 fits realistic multi-image requests.
-- **`host: 127.0.0.1`**: the cluster runs on host networking, so the API would otherwise be on every interface.
-  Set `0.0.0.0` to expose it on the LAN.
+- **`host: 0.0.0.0`**: the API on the LAN (`<box IP>:<port>`). `127.0.0.1` keeps it on the head box only.
 - Thinking is ON by default (model native); disable per request with
   `"chat_template_kwargs": {"enable_thinking": false}` for max speed on structured output.
 - **`patches`** (server): optional vLLM patches from [`patches/`](patches/), off by default — e.g. `patches: hermes-chat`

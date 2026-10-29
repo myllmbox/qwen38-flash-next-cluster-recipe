@@ -13,7 +13,7 @@ server:
                                                 # accept its agreement, then hf auth login or export HF_TOKEN
   # model: azampatti/Qwen3.8-Flash-Next-125B-A5B-INT4-AutoRound   # the v5.2 default, ~122G (needs a smaller kv-cache-memory); not measured on v5.4
   port: 8000                                    # OpenAI API on the head box
-  host: 127.0.0.1                               # 0.0.0.0 to expose it on the LAN
+  host: 0.0.0.0                                 # the API on the LAN (box IP:port); 127.0.0.1 = this box only
   master_port: 25000                            # torch.distributed rendezvous, on the interconnect
   ib_links: 2                                   # RDMA devices per box: 2 = both halves of the ConnectX-7 (needs an IPv4 on the
                                                 # second interface, else run.sh stays on 1)
